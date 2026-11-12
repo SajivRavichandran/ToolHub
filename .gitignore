@@ -1,0 +1,18 @@
+node_modules
+.next
+out
+.env*
+*.log
+.DS_Store
+next-env.d.ts
+
+# Machine-local Claude Code settings
+.claude/settings.local.json
+
+# Unrelated sibling projects that happen to live in this folder
+/MockATS/
+/TaskSponsor/
+/mockats.db
+
+# TypeScript incremental build info
+tsconfig.tsbuildinfo
