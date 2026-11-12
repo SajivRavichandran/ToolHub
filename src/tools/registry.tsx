@@ -6,6 +6,7 @@ import { toolMetas } from "@/tools/metas";
 
 import { LlmRunner } from "@/components/LlmRunner";
 import { CsrGenerator } from "@/tools/csr-generator/Tool";
+import { JwtCreator } from "@/tools/jwt-creator/Tool";
 import { JsonFormatter } from "@/tools/json-formatter/Tool";
 import { WordCounter } from "@/tools/word-counter/Tool";
 import { Base64Tool } from "@/tools/base64/Tool";
@@ -16,6 +17,7 @@ import { Base64Tool } from "@/tools/base64/Tool";
  */
 const componentById: Record<string, ComponentType<ToolComponentProps>> = {
   "csr-generator": CsrGenerator,
+  "jwt-creator": JwtCreator,
   "json-formatter": JsonFormatter,
   "word-counter": WordCounter,
   base64: Base64Tool,

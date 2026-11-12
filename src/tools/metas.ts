@@ -3,6 +3,7 @@ import type { ToolMeta } from "@/tools/types";
 import { meta as summarizer } from "@/tools/summarizer/meta";
 import { meta as explainCode } from "@/tools/explain-code/meta";
 import { meta as csrGenerator } from "@/tools/csr-generator/meta";
+import { meta as jwtCreator } from "@/tools/jwt-creator/meta";
 import { meta as rewrite } from "@/tools/rewrite/meta";
 import { meta as jsonFormatter } from "@/tools/json-formatter/meta";
 import { meta as wordCounter } from "@/tools/word-counter/meta";
@@ -19,6 +20,7 @@ export const toolMetas: ToolMeta[] = [
   summarizer,
   explainCode,
   csrGenerator,
+  jwtCreator,
   rewrite,
   jsonFormatter,
   wordCounter,
