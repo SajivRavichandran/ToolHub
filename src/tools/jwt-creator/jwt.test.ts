@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import * as asn1js from "asn1js";
 import {
   ALGORITHMS,
   generateSecret,
@@ -9,7 +10,27 @@ import {
   isHmac,
   addStandardClaim,
   STANDARD_CLAIMS,
+  prepareSigningKey,
+  publicKeyFromCertOrSpki,
+  importPrivateKeyFlexible,
 } from "./jwt";
+import { generateCertificate } from "../csr-generator/csr";
+import { importPKCS8, exportJWK } from "jose";
+
+/** Downgrade a PKCS#8 PEM to its inner PKCS#1 / SEC1 PEM (for testing import). */
+function pkcs8ToInnerPem(pkcs8Pem: string, label: string): string {
+  const der = Buffer.from(
+    pkcs8Pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""),
+    "base64",
+  );
+  const seq = asn1js.fromBER(
+    der.buffer.slice(der.byteOffset, der.byteOffset + der.byteLength),
+  ).result as asn1js.Sequence;
+  const octet = seq.valueBlock.value[2] as asn1js.OctetString;
+  const inner = Buffer.from(octet.valueBlock.valueHexView);
+  const b64 = inner.toString("base64").match(/.{1,64}/g)!.join("\n");
+  return `-----BEGIN ${label}-----\n${b64}\n-----END ${label}-----\n`;
+}
 
 async function keyMaterial(alg: string) {
   if (isHmac(alg)) {
@@ -134,6 +155,89 @@ describe("time validity vs signature", () => {
     const v = await verifyJwt({ token, key: secret });
     expect(v.signatureValid).toBe(true);
     expect(v.timeStatus).toBe("not-yet-valid");
+  });
+});
+
+describe("flexible private-key import", () => {
+  it("imports a PKCS#1 RSA key and signs (RS256)", async () => {
+    const { privateKeyPem } = await generateKeyPairPem("RS256", 2048);
+    const pkcs1 = pkcs8ToInnerPem(privateKeyPem, "RSA PRIVATE KEY");
+    const { publicKeyPem } = await prepareSigningKey(pkcs1, "RS256");
+    const token = await signJwt({
+      alg: "RS256",
+      header: { alg: "RS256", typ: "JWT" },
+      payload: { sub: "pkcs1" },
+      key: pkcs1,
+    });
+    const v = await verifyJwt({ token, key: publicKeyPem });
+    expect(v.signatureValid).toBe(true);
+  });
+
+  it("imports a SEC1 EC key and signs (ES256)", async () => {
+    const { privateKeyPem } = await generateKeyPairPem("ES256");
+    const sec1 = pkcs8ToInnerPem(privateKeyPem, "EC PRIVATE KEY");
+    const { publicKeyPem } = await prepareSigningKey(sec1, "ES256");
+    const token = await signJwt({
+      alg: "ES256",
+      header: { alg: "ES256", typ: "JWT" },
+      payload: { sub: "sec1" },
+      key: sec1,
+    });
+    const v = await verifyJwt({ token, key: publicKeyPem });
+    expect(v.signatureValid).toBe(true);
+  });
+
+  it("imports a JWK private key and signs (ES256)", async () => {
+    const { privateKeyPem } = await generateKeyPairPem("ES256");
+    const key = await importPKCS8(privateKeyPem, "ES256", { extractable: true });
+    const jwk = JSON.stringify(await exportJWK(key));
+    const { publicKeyPem } = await prepareSigningKey(jwk, "ES256");
+    const token = await signJwt({
+      alg: "ES256",
+      header: { alg: "ES256", typ: "JWT" },
+      payload: { sub: "jwk" },
+      key: jwk,
+    });
+    const v = await verifyJwt({ token, key: publicKeyPem });
+    expect(v.signatureValid).toBe(true);
+  });
+
+  it("derives the correct public key from the private key", async () => {
+    const { privateKeyPem, publicKeyPem } = await generateKeyPairPem("RS256", 2048);
+    const prepared = await prepareSigningKey(privateKeyPem, "RS256");
+    expect(prepared.publicKeyPem.replace(/\s/g, "")).toBe(
+      publicKeyPem.replace(/\s/g, ""),
+    );
+  });
+
+  it("rejects an encrypted private key with a helpful message", async () => {
+    const enc = "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAAAA\n-----END ENCRYPTED PRIVATE KEY-----";
+    await expect(importPrivateKeyFlexible(enc, "RS256")).rejects.toThrow(/decrypt/i);
+  });
+
+  it("rejects a key whose format does not match the algorithm", async () => {
+    const { privateKeyPem } = await generateKeyPairPem("ES256");
+    const sec1 = pkcs8ToInnerPem(privateKeyPem, "EC PRIVATE KEY");
+    await expect(importPrivateKeyFlexible(sec1, "RS256")).rejects.toThrow();
+  });
+});
+
+describe("certificate / public-key extraction (C)", () => {
+  it("extracts the public key from an X.509 cert and matches the private key", async () => {
+    // Build a self-signed cert + key with the CSR tool, then check the JWT tool
+    // derives the same public key from the cert and from the private key.
+    const { privateKeyPem, certPem } = await generateCertificate({
+      subject: { CN: "jwt-signer.example.com" },
+      keyType: "RSA",
+      rsaBits: 2048,
+      selfSigned: true,
+      validityYears: 1,
+      x509Version: 3,
+    });
+    expect(certPem).toBeTruthy();
+    const fromCert = await publicKeyFromCertOrSpki(certPem!, "RS256");
+    const fromPriv = (await prepareSigningKey(privateKeyPem, "RS256")).publicKeyPem;
+    expect(fromCert.replace(/\s/g, "")).toBe(fromPriv.replace(/\s/g, ""));
   });
 });
 

@@ -11,6 +11,7 @@ import {
   generateKeyPair,
   exportPKCS8,
   exportSPKI,
+  exportJWK,
   importPKCS8,
   importSPKI,
   importX509,
@@ -18,6 +19,7 @@ import {
   decodeProtectedHeader,
   type JWK,
 } from "jose";
+import * as asn1js from "asn1js";
 
 // ---------------------------------------------------------------------------
 // Algorithms
@@ -185,6 +187,173 @@ export function addStandardClaim(
 }
 
 // ---------------------------------------------------------------------------
+// Flexible private-key import (PKCS#8 / PKCS#1 / SEC1 / JWK)
+// ---------------------------------------------------------------------------
+
+const EC_CURVE_OID: Record<string, string> = {
+  ES256: "1.2.840.10045.3.1.7",
+  ES384: "1.3.132.0.34",
+  ES512: "1.3.132.0.35",
+};
+
+function pemToDerBytes(pem: string): ArrayBuffer {
+  const b64 = pem
+    .replace(/-----BEGIN[^-]+-----/g, "")
+    .replace(/-----END[^-]+-----/g, "")
+    .replace(/\s+/g, "");
+  return base64ToBytes(b64).buffer;
+}
+
+function derToPem(der: ArrayBuffer, label: string): string {
+  const bytes = new Uint8Array(der);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  const b64 = btoa(bin);
+  const lines = b64.match(/.{1,64}/g) ?? [];
+  return `-----BEGIN ${label}-----\n${lines.join("\n")}\n-----END ${label}-----\n`;
+}
+
+/** Wrap a PKCS#1 RSAPrivateKey (BEGIN RSA PRIVATE KEY) into PKCS#8. */
+function pkcs1ToPkcs8(pkcs1Pem: string): string {
+  const inner = pemToDerBytes(pkcs1Pem);
+  const pkcs8 = new asn1js.Sequence({
+    value: [
+      new asn1js.Integer({ value: 0 }),
+      new asn1js.Sequence({
+        value: [
+          new asn1js.ObjectIdentifier({ value: "1.2.840.113549.1.1.1" }), // rsaEncryption
+          new asn1js.Null(),
+        ],
+      }),
+      new asn1js.OctetString({ valueHex: inner }),
+    ],
+  });
+  return derToPem(pkcs8.toBER(false), "PRIVATE KEY");
+}
+
+/** Wrap a SEC1 ECPrivateKey (BEGIN EC PRIVATE KEY) into PKCS#8 for the alg's curve. */
+function sec1ToPkcs8(sec1Pem: string, curveOid: string): string {
+  const inner = pemToDerBytes(sec1Pem);
+  const pkcs8 = new asn1js.Sequence({
+    value: [
+      new asn1js.Integer({ value: 0 }),
+      new asn1js.Sequence({
+        value: [
+          new asn1js.ObjectIdentifier({ value: "1.2.840.10045.2.1" }), // id-ecPublicKey
+          new asn1js.ObjectIdentifier({ value: curveOid }),
+        ],
+      }),
+      new asn1js.OctetString({ valueHex: inner }),
+    ],
+  });
+  return derToPem(pkcs8.toBER(false), "PRIVATE KEY");
+}
+
+/**
+ * Import a private key from any common encoding and return an extractable
+ * CryptoKey. Accepts PKCS#8, PKCS#1 (RSA), SEC1 (EC) and JWK; rejects
+ * encrypted keys with a clear hint.
+ */
+export async function importPrivateKeyFlexible(
+  material: string,
+  alg: string,
+): Promise<CryptoKey> {
+  const info = getAlgInfo(alg);
+  if (!info) throw new Error(`Unsupported algorithm: ${alg}`);
+  const t = material.trim();
+  if (!t) throw new Error("A private key is required for this algorithm.");
+
+  if (t.startsWith("{")) {
+    let jwk: JWK;
+    try {
+      jwk = JSON.parse(t) as JWK;
+    } catch {
+      throw new Error("Key looks like JWK but is not valid JSON.");
+    }
+    (jwk as { ext?: boolean }).ext = true;
+    return (await importJWK(jwk, alg, { extractable: true })) as CryptoKey;
+  }
+
+  if (t.includes("BEGIN ENCRYPTED PRIVATE KEY")) {
+    throw new Error(
+      "Encrypted private keys aren't supported. Decrypt first: " +
+        "openssl pkcs8 -in enc.pem -out key.pem",
+    );
+  }
+
+  let pkcs8 = t;
+  if (t.includes("BEGIN RSA PRIVATE KEY")) {
+    if (info.kind !== "RSA" && info.kind !== "PSS")
+      throw new Error(`A PKCS#1 RSA private key does not match ${alg}.`);
+    pkcs8 = pkcs1ToPkcs8(t);
+  } else if (t.includes("BEGIN EC PRIVATE KEY")) {
+    if (info.kind !== "EC")
+      throw new Error(`An EC (SEC1) private key does not match ${alg}.`);
+    pkcs8 = sec1ToPkcs8(t, EC_CURVE_OID[alg]);
+  } else if (!t.includes("BEGIN PRIVATE KEY")) {
+    throw new Error(
+      "Unrecognized key. Use a PEM private key (PKCS#8, PKCS#1 or SEC1) or a JWK.",
+    );
+  }
+
+  try {
+    return await importPKCS8(pkcs8, alg, { extractable: true });
+  } catch (e) {
+    throw new Error(`This private key does not match ${alg}. ${(e as Error).message}`);
+  }
+}
+
+function publicPartOfJwk(jwk: JWK): JWK {
+  if (jwk.kty === "RSA") return { kty: "RSA", n: jwk.n, e: jwk.e };
+  if (jwk.kty === "EC") return { kty: "EC", crv: jwk.crv, x: jwk.x, y: jwk.y };
+  if (jwk.kty === "OKP") return { kty: "OKP", crv: jwk.crv, x: jwk.x };
+  throw new Error(`Unsupported key type: ${jwk.kty}`);
+}
+
+export interface PreparedSigningKey {
+  privateKey: CryptoKey;
+  /** SPKI PEM of the matching public key, derived from the private key. */
+  publicKeyPem: string;
+}
+
+/** Import a private key (any format) AND derive its matching public key (SPKI PEM). */
+export async function prepareSigningKey(
+  material: string,
+  alg: string,
+): Promise<PreparedSigningKey> {
+  const privateKey = await importPrivateKeyFlexible(material, alg);
+  const t = material.trim();
+  const jwk = t.startsWith("{")
+    ? (JSON.parse(t) as JWK)
+    : await exportJWK(privateKey);
+  const pubKey = (await importJWK(publicPartOfJwk(jwk), alg, {
+    extractable: true,
+  })) as CryptoKey;
+  const publicKeyPem = await exportSPKI(pubKey);
+  return { privateKey, publicKeyPem };
+}
+
+/** Extract the public key (SPKI PEM) from an X.509 certificate, SPKI PEM, or JWK. */
+export async function publicKeyFromCertOrSpki(
+  material: string,
+  alg: string,
+): Promise<string> {
+  const t = material.trim();
+  if (!t) throw new Error("No certificate or public key provided.");
+  let key: CryptoKey;
+  if (t.startsWith("{")) {
+    key = (await importJWK(JSON.parse(t) as JWK, alg, { extractable: true })) as CryptoKey;
+  } else if (t.includes("BEGIN CERTIFICATE")) {
+    key = await importX509(t, alg, { extractable: true });
+  } else if (t.includes("BEGIN PUBLIC KEY")) {
+    key = await importSPKI(t, alg, { extractable: true });
+  } else {
+    throw new Error("Provide an X.509 certificate, an SPKI public key, or a JWK.");
+  }
+  return exportSPKI(key);
+}
+
+// ---------------------------------------------------------------------------
 // Signing
 // ---------------------------------------------------------------------------
 
@@ -208,16 +377,7 @@ export async function signJwt(params: SignParams): Promise<string> {
     if (!key) throw new Error("A secret is required for HMAC algorithms.");
     cryptoKey = secretToBytes(key, params.secretBase64);
   } else {
-    if (!key.includes("BEGIN")) {
-      throw new Error("A PKCS#8 PEM private key is required for this algorithm.");
-    }
-    try {
-      cryptoKey = await importPKCS8(key, alg);
-    } catch (e) {
-      throw new Error(
-        `This private key does not match ${alg}. ${(e as Error).message}`,
-      );
-    }
+    cryptoKey = await importPrivateKeyFlexible(key, alg);
   }
 
   const protectedHeader = { ...header, alg };

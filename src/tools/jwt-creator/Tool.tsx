@@ -11,6 +11,8 @@ import {
   isAsymmetric,
   generateSecret,
   generateKeyPairPem,
+  prepareSigningKey,
+  publicKeyFromCertOrSpki,
   signJwt,
   verifyJwt,
   decodeToken,
@@ -48,6 +50,9 @@ export function JwtCreator(_props: ToolComponentProps) {
   const [rsaBits, setRsaBits] = useState(2048);
   const [privPem, setPrivPem] = useState("");
   const [pubPem, setPubPem] = useState("");
+  const [certPem, setCertPem] = useState("");
+  const [keyError, setKeyError] = useState<string | null>(null);
+  const [matchStatus, setMatchStatus] = useState<"match" | "mismatch" | "error" | null>(null);
   const [genningKeys, setGenningKeys] = useState(false);
   const [signing, setSigning] = useState(false);
   const [token, setToken] = useState("");
@@ -102,6 +107,9 @@ export function JwtCreator(_props: ToolComponentProps) {
   async function onGenerateKeyPair() {
     setGenningKeys(true);
     setSignError(null);
+    setKeyError(null);
+    setCertPem("");
+    setMatchStatus(null);
     try {
       const { privateKeyPem, publicKeyPem } = await generateKeyPairPem(alg, rsaBits);
       setPrivPem(privateKeyPem);
@@ -112,6 +120,67 @@ export function JwtCreator(_props: ToolComponentProps) {
       setGenningKeys(false);
     }
   }
+
+  // Auto-derive the matching public key from whatever private key is present
+  // (any of PKCS#8 / PKCS#1 / SEC1 / JWK), debounced.
+  useEffect(() => {
+    if (isHmac(alg)) {
+      setKeyError(null);
+      return;
+    }
+    const material = privPem.trim();
+    if (!material) {
+      setPubPem("");
+      setKeyError(null);
+      return;
+    }
+    const looksComplete = material.startsWith("{")
+      ? material.endsWith("}")
+      : /END [A-Z ]*PRIVATE KEY-----/.test(material);
+    if (!looksComplete) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const { publicKeyPem } = await prepareSigningKey(material, alg);
+        if (cancelled) return;
+        setPubPem(publicKeyPem);
+        setKeyError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setPubPem("");
+        setKeyError((e as Error).message);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [privPem, alg]);
+
+  // When a certificate / public key is supplied, check it matches the private key.
+  useEffect(() => {
+    const c = certPem.trim();
+    if (!c || !pubPem) {
+      setMatchStatus(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const certPub = await publicKeyFromCertOrSpki(c, alg);
+        if (cancelled) return;
+        setMatchStatus(
+          certPub.replace(/\s/g, "") === pubPem.replace(/\s/g, "") ? "match" : "mismatch",
+        );
+      } catch {
+        if (!cancelled) setMatchStatus("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [certPem, pubPem, alg]);
 
   async function onGenerate() {
     setSignError(null);
@@ -297,20 +366,45 @@ export function JwtCreator(_props: ToolComponentProps) {
                   )}
                 </div>
                 <TextArea
-                  label="Private Key (PKCS#8 PEM)"
+                  label="Private Key (PKCS#8, PKCS#1, SEC1 PEM, or JWK)"
                   value={privPem}
                   onChange={setPrivPem}
+                  error={keyError}
                   rows={5}
-                  placeholder="-----BEGIN PRIVATE KEY-----"
+                  placeholder={"-----BEGIN PRIVATE KEY----- / -----BEGIN RSA PRIVATE KEY----- / -----BEGIN EC PRIVATE KEY----- / { JWK }"}
                 />
                 {pubPem && (
                   <TextArea
-                    label="Public Key (SPKI PEM) — share to let others verify"
+                    label="Public Key (SPKI PEM) — derived from your private key; share it to let others verify"
                     value={pubPem}
                     readOnly
                     rows={4}
                   />
                 )}
+                <div className="flex flex-col gap-1.5">
+                  <TextArea
+                    label="Certificate or public key (optional)"
+                    value={certPem}
+                    onChange={setCertPem}
+                    rows={4}
+                    placeholder="Paste an X.509 certificate, an SPKI public key, or a JWK to cross-check against your private key"
+                  />
+                  {matchStatus === "match" && (
+                    <span className="w-fit rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
+                      ✓ Certificate matches the private key
+                    </span>
+                  )}
+                  {matchStatus === "mismatch" && (
+                    <span className="w-fit rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-950 dark:text-red-300">
+                      ✗ Certificate does NOT match the private key
+                    </span>
+                  )}
+                  {matchStatus === "error" && (
+                    <span className="w-fit rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                      Could not read this certificate / public key
+                    </span>
+                  )}
+                </div>
               </div>
             )}
           </section>
