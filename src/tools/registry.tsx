@@ -5,6 +5,7 @@ import type { Tool, ToolComponentProps } from "@/tools/types";
 import { toolMetas } from "@/tools/metas";
 
 import { LlmRunner } from "@/components/LlmRunner";
+import { RewriteRunner } from "@/tools/rewrite/Tool";
 import { CsrGenerator } from "@/tools/csr-generator/Tool";
 import { JwtCreator } from "@/tools/jwt-creator/Tool";
 import { JsonFormatter } from "@/tools/json-formatter/Tool";
@@ -12,10 +13,12 @@ import { WordCounter } from "@/tools/word-counter/Tool";
 import { Base64Tool } from "@/tools/base64/Tool";
 
 /**
- * Map of toolId -> React component. LLM tools share the generic `LlmRunner`;
- * local tools provide their own component. Add a local tool's component here.
+ * Map of toolId -> React component. Local tools provide their own component.
+ * LLM tools default to the generic `LlmRunner`, but may override it here (e.g.
+ * Rewrite adds style controls). An entry here always wins.
  */
 const componentById: Record<string, ComponentType<ToolComponentProps>> = {
+  rewrite: RewriteRunner,
   "csr-generator": CsrGenerator,
   "jwt-creator": JwtCreator,
   "json-formatter": JsonFormatter,
@@ -26,7 +29,7 @@ const componentById: Record<string, ComponentType<ToolComponentProps>> = {
 /** Fully-assembled tools (metadata + component), in registry order. */
 export const tools: Tool[] = toolMetas.map((meta) => {
   const component =
-    meta.type === "llm" ? LlmRunner : componentById[meta.id];
+    componentById[meta.id] ?? (meta.type === "llm" ? LlmRunner : undefined);
   if (!component) {
     throw new Error(
       `No component registered for local tool "${meta.id}". Add it to componentById in registry.tsx.`,
