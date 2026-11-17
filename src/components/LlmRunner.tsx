@@ -2,25 +2,34 @@
 
 import { useState } from "react";
 import type { ToolComponentProps } from "@/tools/types";
-import { useClaudeStream } from "@/components/useClaudeStream";
+import { useLlmTool } from "@/components/useLlmTool";
 import { MarkdownOutput } from "@/components/MarkdownOutput";
+import { FileDrop } from "@/components/FileDrop";
+import { HistoryPanel } from "@/components/HistoryPanel";
 
 const MAX_INPUT = 20_000;
 
 export function LlmRunner({ tool }: ToolComponentProps) {
   const [input, setInput] = useState("");
-  const { output, status, error, run, stop } = useClaudeStream(tool.id);
+  const { output, status, error, run, stop, history } = useLlmTool(tool.id);
 
   const tooLong = input.length > MAX_INPUT;
 
+  function appendFileText(text: string) {
+    setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${text}` : text));
+  }
+
   return (
     <div className="flex flex-col gap-4">
+      <FileDrop onText={appendFileText} disabled={status === "running"} />
+
       <div className="flex flex-col gap-1">
         <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !tooLong) run(input);
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !tooLong)
+              run(input);
           }}
           placeholder={tool.placeholder ?? "Enter your input…"}
           className="h-44 w-full resize-y rounded-lg border border-neutral-300 bg-white p-3 text-sm outline-none focus:ring-2 focus:ring-blue-500 dark:border-neutral-700 dark:bg-neutral-900"
@@ -68,6 +77,15 @@ export function LlmRunner({ tool }: ToolComponentProps) {
       )}
 
       {output && <MarkdownOutput text={output} />}
+
+      <HistoryPanel
+        entries={history.entries}
+        loading={history.loading}
+        onReload={history.refresh}
+        onRemove={history.remove}
+        onClear={history.clear}
+        onLoad={(entry) => setInput(entry.input)}
+      />
     </div>
   );
 }

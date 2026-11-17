@@ -2,8 +2,10 @@
 
 import { useState } from "react";
 import type { ToolComponentProps } from "@/tools/types";
-import { useClaudeStream } from "@/components/useClaudeStream";
+import { useLlmTool } from "@/components/useLlmTool";
 import { MarkdownOutput } from "@/components/MarkdownOutput";
+import { FileDrop } from "@/components/FileDrop";
+import { HistoryPanel } from "@/components/HistoryPanel";
 
 const MAX_INPUT = 20_000;
 
@@ -42,7 +44,34 @@ export function RewriteRunner({ tool }: ToolComponentProps) {
   const [preserveFormatting, setPreserveFormatting] = useState(true);
   const [custom, setCustom] = useState("");
 
-  const { output, status, error, run, stop } = useClaudeStream(tool.id);
+  const { output, status, error, run, stop, history } = useLlmTool(tool.id);
+
+  function appendFileText(fileText: string) {
+    setText((prev) => (prev.trim() ? `${prev.trim()}\n\n${fileText}` : fileText));
+  }
+
+  function startRun() {
+    run(prompt, {
+      historyInput: text,
+      meta: { audience, tone, formality, urgency, length, custom, preserveFormatting },
+    });
+  }
+
+  function loadFromHistory(entry: {
+    input: string;
+    meta?: Record<string, unknown>;
+  }) {
+    setText(entry.input);
+    const m = entry.meta ?? {};
+    if (typeof m.audience === "string") setAudience(m.audience);
+    if (typeof m.tone === "string") setTone(m.tone);
+    if (typeof m.formality === "string") setFormality(m.formality);
+    if (typeof m.urgency === "string") setUrgency(m.urgency);
+    if (typeof m.length === "string") setLength(m.length);
+    if (typeof m.custom === "string") setCustom(m.custom);
+    if (typeof m.preserveFormatting === "boolean")
+      setPreserveFormatting(m.preserveFormatting);
+  }
 
   function buildPrompt(): string {
     const lines = [
@@ -131,13 +160,14 @@ export function RewriteRunner({ tool }: ToolComponentProps) {
       </section>
 
       {/* Source text */}
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-2">
         <span className="text-sm font-medium">Text to rewrite</span>
+        <FileDrop onText={appendFileText} disabled={status === "running"} />
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !tooLong) run(prompt);
+            if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !tooLong) startRun();
           }}
           placeholder={tool.placeholder ?? "Paste the text to rewrite…"}
           className="h-52 w-full resize-y rounded-lg border border-neutral-300 bg-white p-3 text-sm outline-none focus:ring-2 focus:ring-blue-500 dark:border-neutral-700 dark:bg-neutral-900"
@@ -160,7 +190,7 @@ export function RewriteRunner({ tool }: ToolComponentProps) {
           </button>
         ) : (
           <button
-            onClick={() => run(prompt)}
+            onClick={startRun}
             disabled={!text.trim() || tooLong}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
           >
@@ -185,6 +215,15 @@ export function RewriteRunner({ tool }: ToolComponentProps) {
       )}
 
       {output && <MarkdownOutput text={output} />}
+
+      <HistoryPanel
+        entries={history.entries}
+        loading={history.loading}
+        onReload={history.refresh}
+        onRemove={history.remove}
+        onClear={history.clear}
+        onLoad={loadFromHistory}
+      />
     </div>
   );
 }

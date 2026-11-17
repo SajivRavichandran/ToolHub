@@ -15,14 +15,15 @@ export function useClaudeStream(toolId: string) {
   const abortRef = useRef<AbortController | null>(null);
 
   const run = useCallback(
-    async (input: string) => {
-      if (!input.trim() || status === "running") return;
+    async (input: string): Promise<string | null> => {
+      if (!input.trim() || status === "running") return null;
       setStatus("running");
       setOutput("");
       setError(null);
 
       const controller = new AbortController();
       abortRef.current = controller;
+      let acc = "";
 
       try {
         const res = await fetch("/api/claude", {
@@ -56,6 +57,7 @@ export function useClaudeStream(toolId: string) {
               continue;
             }
             if (evt.type === "delta" && evt.text) {
+              acc += evt.text;
               setOutput((prev) => prev + evt.text);
             } else if (evt.type === "error") {
               throw new Error(evt.message || "The assistant returned an error.");
@@ -63,13 +65,15 @@ export function useClaudeStream(toolId: string) {
           }
         }
         setStatus("idle");
+        return acc;
       } catch (e) {
         if ((e as Error).name === "AbortError") {
           setStatus("idle");
-          return;
+          return null;
         }
         setError((e as Error).message);
         setStatus("error");
+        return null;
       } finally {
         abortRef.current = null;
       }
